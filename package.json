@@ -1,0 +1,10 @@
+{
+  "name": "zangbeto-devnet",
+  "version": "0.1.8",
+  "type": "module",
+  "dependencies": {
+    "@mysten/sui.js": "^0.52.0",
+    "arweave": "^1.14.4",
+    "dotenv": "^16.4.5"
+  }
+}

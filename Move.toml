@@ -1,0 +1,12 @@
+[package]
+name = "zangbeto"
+version = "0.1.8"
+edition = "2024.beta"
+
+[addresses]
+zbt = "0x0"
+
+[dev-addresses]
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework", rev = "main" }
