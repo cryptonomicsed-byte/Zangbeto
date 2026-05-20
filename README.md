@@ -15,6 +15,21 @@ sui move build
 ./scripts/bootstrap.sh
 ```
 
+## Structured Diagnostics
+
+Zàngbétò now supports canonical diagnostic format for AI agents:
+
+```bash
+# Python emission
+python3 omo_diagnostic.py --package myapp --file src/main.py --line 42 \
+    --code OMO-ERR-023 --severity error --message "Balance underflow"
+
+# Rust crate (crates/omo-diagnostic)
+cargo add omo-diagnostic
+
+# Julia helper (src/Diagnostic.jl)
+```
+
 ## First Dance
 
 1. Seed a tiny bug in examples/payments.move.
@@ -27,7 +42,7 @@ sui move build
 
 ## Quickstart
 
-- Move modules (zbt_errors, zbt_guard, zbt_core)
+- Move modules (zbt_errors, zbt_guard, zbt_core, zbt_diagnostics)
 - Example contract (examples/payments.move)
 - Bootstrap & ops scripts (publish/init, Arweave, OpenTimestamps)
 - Event listener & persisted cursors

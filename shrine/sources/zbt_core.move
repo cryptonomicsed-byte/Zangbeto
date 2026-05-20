@@ -8,6 +8,7 @@ module zbt::core {
     use 0x2::bcs;
     use 0x2::vector;
     use 0x2::signer;
+    use 0x2::object;
     use zbt::errors::*;
 
     struct ReceiptSubmitted has drop, store { id: u64, witness: address, severity: u8 }
@@ -206,5 +207,55 @@ module zbt::core {
     public fun register_witness_stats(reg: &mut WitnessRegistry, witness: address, stats_id: ID) {
         if (table::contains(&mut reg.stats_table, witness)) { table::remove(&mut reg.stats_table, witness); };
         table::add(&mut reg.stats_table, witness, stats_id);
+    }
+
+    public fun submit_diagnostic_receipt(
+        ws: &WitnessSet,
+        rl: &mut ReceiptLedger,
+        diag_ledger: &mut zbt::diagnostics::DiagnosticLedger,
+        clock_ref: &Clock,
+        witness: &signer,
+        code: vector<u8>,
+        severity: u8,
+        category: u8,
+        message_hash: vector<u8>,
+        agent_id: vector<u8>,
+        birth_epoch: u64,
+        tier: u8,
+        sabbath_active: bool,
+        repair_id: vector<u8>,
+        repair_strategy: u8,
+        ctx: &mut TxContext,
+    ): object::ID {
+        let addr = signer::address_of(witness);
+        assert!(vector::contains(&ws.witnesses, &addr), E_NOT_WITNESS);
+
+        let receipt = zbt::diagnostics::emit_diagnostic(
+            ctx,
+            code,
+            severity,
+            category,
+            message_hash,
+            agent_id,
+            birth_epoch,
+            tier,
+            sabbath_active,
+            repair_id,
+            repair_strategy,
+        );
+
+        let receipt_id = object::id(&receipt.id);
+        zbt::diagnostics::store_diagnostic(diag_ledger, receipt);
+
+        zbt::guard::emit_diagnostic_event(
+            receipt_id,
+            code,
+            severity,
+            category,
+            agent_id,
+            repair_id,
+        );
+
+        receipt_id
     }
 }

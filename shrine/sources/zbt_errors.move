@@ -9,4 +9,7 @@ module zbt::errors {
     const E_NONCE_REUSED: u64 = 9108;
     const E_PUBKEY_INVALID: u64 = 9109;
     const E_EVIDENCE_HASH_INVALID: u64 = 9110;
+    const E_SCHEMA_INVALID: u64 = 9111;
+    const E_REPAIR_STRATEGY_INVALID: u64 = 9112;
+    const E_ANCHOR_ALREADY_SET: u64 = 9113;
 }

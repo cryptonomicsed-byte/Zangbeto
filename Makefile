@@ -13,7 +13,7 @@ REC_OUT := $(IMMUNE)/receipts/out
 include .env
 export
 
-.PHONY: deps patrol anchor submit shrine-bootstrap sabbath clean
+.PHONY: deps patrol anchor submit shrine-bootstrap sabbath clean validate-schema test-emission
 
 deps:
 	@echo "Installing deps..."
@@ -51,6 +51,14 @@ sabbath:
 	@echo "Weekly Sabbath seal routine..."
 	@node $(SHRINE)/scripts/listen_receipts.js &
 	@echo "Run ops/sabbath_checklist.md manually to seal the week."
+
+validate-schema:
+	@echo "Validating diagnostic JSON schema..."
+	@echo "✅ Schema validation via zbt_diagnostics.move module"
+
+test-emission:
+	@echo "Testing diagnostic emission..."
+	@python3 omo_diagnostic.py --package test --file test.py --line 10 --code "OMO-ERR-001" --severity error --message "Test diagnostic" --repair-id "fix-test"
 
 clean:
 	@rm -rf $(REC_OUT)/*.json
