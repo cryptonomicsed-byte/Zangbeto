@@ -122,6 +122,22 @@ impl CanonicalStateIR {
         canonicalize_json(&mut value);
         serde_json::to_string(&value).unwrap()
     }
+
+    pub fn opcode_name(&self) -> String {
+        // Extract enum variant name as string
+        serde_json::to_value(self).unwrap()["op"].as_str().unwrap().into()
+    }
+    
+    pub fn target_path(&self) -> Option<String> {
+        // Extract path from op args if present
+        match self {
+            CanonicalStateIR::UpdateMemory { key, scope, .. } => {
+                Some(format!("/memory/{:?}/{}", scope, key))
+            }
+            CanonicalStateIR::BlessPath { path, .. } => Some(path.clone()),
+            _ => None,
+        }
+    }
 }
 
 pub fn canonicalize_json(value: &mut serde_json::Value) {
