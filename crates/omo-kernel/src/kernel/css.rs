@@ -67,7 +67,8 @@ impl CanonicalSystemState {
     pub fn compute_hash(&self) -> String {
         let mut state_clone = self.clone();
         state_clone.state_hash = String::new(); // exclude hash from hash
-        let serialized = serde_json::to_vec(&state_clone).unwrap();
+        let serialized = serde_cbor::to_vec(&state_clone)
+            .expect("CBOR serialization of CanonicalSystemState must not fail");
         let mut hasher = Sha256::new();
         hasher.update(serialized);
         format!("sha256:{}", hex::encode(hasher.finalize()))
