@@ -12,7 +12,7 @@ pub struct CapabilityToken {
     pub expiry: u64,                // UNIX timestamp
     pub authority_source: AuthoritySource,
     pub delegation_chain: Vec<Uuid>, // parent tokens
-    pub signature: String,          // cryptographic proof
+    pub signature: Vec<u8>,         // cryptographic proof (Ed25519)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,8 +96,13 @@ impl CapabilityToken {
                 chain.push(self.token_id);
                 chain
             },
-            signature: String::new(), // re-sign in production
+            signature: vec![], // caller must re-sign via crypto-kernel
         }
+    }
+
+    /// Whether this token carries a cryptographic signature
+    pub fn is_signed(&self) -> bool {
+        !self.signature.is_empty()
     }
 }
 
