@@ -322,7 +322,7 @@ mod tests {
             expiry: chrono::Utc::now().timestamp() as u64 + 3600,
             authority_source: capability::AuthoritySource::EsuSystem,
             delegation_chain: vec![],
-            signature: "valid".into(),
+            signature: b"valid".to_vec(),
         };
 
         let context = ExecutionContext {

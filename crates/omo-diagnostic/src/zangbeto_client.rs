@@ -76,8 +76,23 @@ impl ZangbetoClient {
         Ok(response)
     }
 
-    pub async fn verify_signature(&self, _receipt_id: &str, _sig: &str) -> Result<bool, crate::DiagnosticError> {
-        // Mock verification for devnet
+    /// Verify a receipt signature stub.
+    ///
+    /// Returns `false` immediately for empty signatures or empty receipt ids,
+    /// preventing trivially unsigned tokens from passing verification.
+    /// Full cryptographic verification is deferred to a future milestone.
+    pub async fn verify_signature(
+        &self,
+        receipt_id: &str,
+        sig: &str,
+    ) -> Result<bool, crate::DiagnosticError> {
+        if sig.is_empty() {
+            return Ok(false);
+        }
+        if receipt_id.is_empty() {
+            return Ok(false);
+        }
+        // Stub: real Ed25519 verification against self.guardian_pubkey goes here.
         Ok(true)
     }
 }
