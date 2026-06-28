@@ -10,6 +10,7 @@ pub mod arbitration;
 pub mod rollback;
 pub mod receipts;
 pub mod daemon;
+pub mod http;
 
 pub use daemon::{ZangbetoDaemon, DaemonConfig, EnforcementEvent, EnforcementReceipt};
 pub use anomaly::{Anomaly, AnomalySeverity, AnomalyClassification, AnomalySource};
