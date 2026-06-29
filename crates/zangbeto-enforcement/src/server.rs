@@ -7,8 +7,11 @@
 //!
 //! - `GET  /health`  → `{"status":"ok"}`
 //! - `POST /enforce` → body `{agent_id, severity, classification, detail?, confidence?}`
-//!   returns `{agent_id, action_kind, rationale, action}` where `action` is the
-//!   full serialized [`EnforcementAction`] from the [`ActionLadder`].
+//!   returns `{agent_id, action_kind, block, rationale, action}` where `action` is
+//!   the full serialized [`EnforcementAction`] and `block` is the boolean the
+//!   Ọmọ Kọ́dà runtime reads to gate the act.
+//! - `POST /review`  → body `{agent_id, tool}` — review a *proposed* act before
+//!   it runs (Warning-level capability use); same response shape.
 //!
 //! `severity` ∈ observational | warning | critical | catastrophic.
 //! `classification` ∈ schema_drift | economic_anomaly | temporal_inconsistency |
@@ -45,8 +48,30 @@ struct EnforceRequest {
 struct EnforceResponse {
     agent_id: String,
     action_kind: String,
+    /// Whether the verdict gates the act. Mirrors the keyword in `action_kind`
+    /// into the boolean field the Ọmọ Kọ́dà runtime reads (`verdict_blocks()`
+    /// honors `{"block": true}`), so `quarantine_state` / `rollback_transition`
+    /// / `punish_agent` / `emergency_halt` deny the act and the rest allow it.
+    block: bool,
     rationale: String,
     action: serde_json::Value,
+}
+
+/// Does this `action_kind` (the serialized [`EnforcementAction`] variant tag)
+/// gate the act?
+fn blocks(action_kind: &str) -> bool {
+    matches!(
+        action_kind,
+        "quarantine_state" | "rollback_transition" | "punish_agent" | "emergency_halt"
+    )
+}
+
+/// Pre-act review request: the runtime asks whether a *proposed* act should run.
+#[derive(Debug, Deserialize)]
+struct ReviewRequest {
+    agent_id: String,
+    #[serde(default)]
+    tool: String,
 }
 
 fn parse_severity(s: &str) -> AnomalySeverity {
@@ -139,6 +164,7 @@ fn decide(req: &EnforceRequest) -> EnforceResponse {
 
     EnforceResponse {
         agent_id: req.agent_id.clone(),
+        block: blocks(&action_kind),
         action_kind,
         rationale: decision.rationale,
         action,
@@ -162,6 +188,26 @@ fn route(method: &str, path: &str, body: &[u8]) -> (u16, String) {
                 )
             }
             _ => (400, r#"{"error":"invalid enforce request"}"#.to_string()),
+        },
+        // Review a *proposed* act before it runs: treated as a Warning-level
+        // capability use, so the default ladder flags it for review (non-blocking)
+        // unless policy escalates. Same response shape as /enforce.
+        ("POST", "/review") => match serde_json::from_slice::<ReviewRequest>(body) {
+            Ok(req) if !req.agent_id.trim().is_empty() => {
+                let enforce_req = EnforceRequest {
+                    agent_id: req.agent_id,
+                    severity: "warning".into(),
+                    classification: "capability_escape".into(),
+                    detail: req.tool,
+                    confidence: 0.5,
+                };
+                let resp = decide(&enforce_req);
+                (
+                    200,
+                    serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into()),
+                )
+            }
+            _ => (400, r#"{"error":"invalid review request"}"#.to_string()),
         },
         _ => (404, r#"{"error":"not found"}"#.to_string()),
     }
@@ -308,5 +354,44 @@ mod tests {
     fn unknown_route_404() {
         let (status, _) = route("GET", "/nope", b"");
         assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn enforce_response_carries_block_flag() {
+        // The runtime's verdict_blocks() honors {"block": true}; a quarantine /
+        // halt must set it, a permissive verdict must not.
+        let (_, q) = enforce(
+            r#"{"agent_id":"a","severity":"critical","classification":"concurrency_conflict"}"#,
+        );
+        assert_eq!(q["action_kind"], "quarantine_state");
+        assert_eq!(q["block"], true);
+
+        let (_, halt) =
+            enforce(r#"{"agent_id":"a","severity":"catastrophic","classification":"x"}"#);
+        assert_eq!(halt["block"], true);
+
+        let (_, obs) =
+            enforce(r#"{"agent_id":"a","severity":"observational","classification":"x"}"#);
+        assert_eq!(obs["block"], false);
+    }
+
+    #[test]
+    fn review_of_normal_act_is_non_blocking() {
+        // A proposed act reviewed at Warning level → flag_for_review → allowed.
+        let (status, resp) = route(
+            "POST",
+            "/review",
+            br#"{"agent_id":"a","tool":"web_search"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(v["action_kind"], "flag_for_review");
+        assert_eq!(v["block"], false);
+    }
+
+    #[test]
+    fn review_missing_agent_id_is_rejected() {
+        let (status, _) = route("POST", "/review", br#"{"tool":"x"}"#);
+        assert_eq!(status, 400);
     }
 }
