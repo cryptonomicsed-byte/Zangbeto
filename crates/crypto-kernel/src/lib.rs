@@ -1,3 +1,5 @@
+pub mod glyph_audit;
+
 use ed25519_dalek::{Signer, Verifier, SigningKey, VerifyingKey};
 use sha2::{Sha256, Digest};
 use serde::{Serialize, Deserialize};
