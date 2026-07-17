@@ -7,6 +7,7 @@ pub mod action_ladder;
 pub mod anomaly;
 pub mod arbitration;
 pub mod daemon;
+pub mod guardian;
 pub mod http;
 pub mod quarantine;
 pub mod receipts;

@@ -10,8 +10,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("🌀 Starting Zàngbétò Native Steward");
 
     let (diag_tx, mut diag_rx) = tokio::sync::mpsc::channel(100);
-    let zangbeto = ZangbetoClient::new("http://localhost:9000".into(), "0xguardian".into());
-    
+    // Port 8787 is the real Zàngbétò enforcement bridge (ZANGBETO_URL in
+    // Omo-Koda2's own systemd unit) -- fetch the guardian's real public key
+    // from it rather than trusting a hardcoded placeholder, so signature
+    // verification is meaningful instead of failing (or silently no-op'ing
+    // on) every real receipt.
+    let zangbeto_endpoint =
+        std::env::var("ZANGBETO_URL").unwrap_or_else(|_| "http://localhost:8787".into());
+    let bootstrap_client = ZangbetoClient::new(zangbeto_endpoint.clone(), String::new());
+    let guardian_pubkey = bootstrap_client.fetch_guardian_pubkey().await.map_err(|e| {
+        format!("failed to fetch Zàngbétò guardian pubkey from {zangbeto_endpoint}: {e}")
+    })?;
+    let zangbeto = ZangbetoClient::new(zangbeto_endpoint, guardian_pubkey);
+
     let archive = omo_diagnostic::agent::archive::Archive::new(&std::env::current_dir()?);
     
     let handler = DiagnosticHandler::new(

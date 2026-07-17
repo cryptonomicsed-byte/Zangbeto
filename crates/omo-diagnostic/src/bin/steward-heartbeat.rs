@@ -204,8 +204,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (diag_tx, mut diag_rx) = tokio::sync::mpsc::channel::<Diagnostic>(100);
 
+    // Port 8787 is the real Zàngbétò enforcement bridge; fetch its guardian's
+    // real public key rather than a hardcoded placeholder (see steward.rs
+    // for the same fix and rationale).
+    let zangbeto_endpoint =
+        std::env::var("ZANGBETO_URL").unwrap_or_else(|_| "http://localhost:8787".into());
+    let bootstrap_client =
+        omo_diagnostic::zangbeto_client::ZangbetoClient::new(zangbeto_endpoint.clone(), String::new());
+    let guardian_pubkey = match bootstrap_client.fetch_guardian_pubkey().await {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("⚠️  failed to fetch Zàngbétò guardian pubkey from {zangbeto_endpoint}: {e}");
+            String::new()
+        }
+    };
+
     let handler = omo_diagnostic::agent::diagnostic_handler::DiagnosticHandler::new(
-        omo_diagnostic::zangbeto_client::ZangbetoClient::new("http://localhost:9000".into(), "0xmock".into()),
+        omo_diagnostic::zangbeto_client::ZangbetoClient::new(zangbeto_endpoint, guardian_pubkey),
         diag_tx.clone(),
         auto_merge_threshold,
         std::env::current_dir().unwrap(),
