@@ -1,4 +1,6 @@
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Serialize, Deserialize};
+use sha2::{Digest, Sha256};
 use crate::{Diagnostic};
 
 pub struct ZangbetoClient {
@@ -7,7 +9,7 @@ pub struct ZangbetoClient {
     pub guardian_pubkey: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ZangbetoPayload {
     pub code: String,
     pub severity: u8,
@@ -72,27 +74,77 @@ impl ZangbetoClient {
             .await?
             .json::<ZangbetoReceipt>()
             .await?;
-        
+
         Ok(response)
     }
 
-    /// Verify a receipt signature stub.
-    ///
-    /// Returns `false` immediately for empty signatures or empty receipt ids,
-    /// preventing trivially unsigned tokens from passing verification.
-    /// Full cryptographic verification is deferred to a future milestone.
-    pub async fn verify_signature(
+    /// Fetch the guardian's current Ed25519 public key (hex) directly from
+    /// the daemon, rather than trusting whatever `self.guardian_pubkey` was
+    /// constructed with -- callers that hardcoded a placeholder (or an
+    /// out-of-date key) get the real one instead of silently failing every
+    /// verification.
+    pub async fn fetch_guardian_pubkey(&self) -> Result<String, reqwest::Error> {
+        #[derive(Deserialize)]
+        struct PubkeyResponse {
+            guardian_pubkey: String,
+        }
+        let resp = self
+            .http
+            .get(&format!("{}/guardian/pubkey", self.endpoint))
+            .send()
+            .await?
+            .json::<PubkeyResponse>()
+            .await?;
+        Ok(resp.guardian_pubkey)
+    }
+
+    /// Verify a receipt's Ed25519 signature against the guardian's public
+    /// key. `payload` must be the exact payload that was submitted to
+    /// `/diagnostics` to produce this receipt -- the signature binds both
+    /// the receipt id and the payload contents, so a receipt replayed
+    /// against a different payload (or a different receipt id) fails to
+    /// verify. Mirrors zangbeto-enforcement's `guardian::verify_receipt`
+    /// exactly: `sha256(receipt_id || canonical_json(payload))`, where
+    /// `canonical_json` is `serde_json::to_vec` on a `Value` (parse-then-
+    /// reserialize normalizes key order via `Value`'s `BTreeMap`, so it
+    /// matches regardless of the wire order `payload` happened to encode
+    /// in).
+    pub fn verify_signature(
         &self,
         receipt_id: &str,
+        payload: &ZangbetoPayload,
         sig: &str,
     ) -> Result<bool, crate::DiagnosticError> {
-        if sig.is_empty() {
+        if sig.is_empty() || receipt_id.is_empty() {
             return Ok(false);
         }
-        if receipt_id.is_empty() {
+
+        let Ok(pubkey_bytes) = hex::decode(&self.guardian_pubkey) else {
             return Ok(false);
-        }
-        // Stub: real Ed25519 verification against self.guardian_pubkey goes here.
-        Ok(true)
+        };
+        let Ok(pubkey_arr): Result<[u8; 32], _> = pubkey_bytes.try_into() else {
+            return Ok(false);
+        };
+        let Ok(verifying_key) = VerifyingKey::from_bytes(&pubkey_arr) else {
+            return Ok(false);
+        };
+
+        let Ok(sig_bytes) = hex::decode(sig) else {
+            return Ok(false);
+        };
+        let Ok(sig_arr): Result<[u8; 64], _> = sig_bytes.try_into() else {
+            return Ok(false);
+        };
+        let signature = Signature::from_bytes(&sig_arr);
+
+        let canonical_value = serde_json::to_value(payload).unwrap_or(serde_json::Value::Null);
+        let canonical_bytes = serde_json::to_vec(&canonical_value).unwrap_or_default();
+
+        let mut hasher = Sha256::new();
+        hasher.update(receipt_id.as_bytes());
+        hasher.update(&canonical_bytes);
+        let digest = hasher.finalize();
+
+        Ok(verifying_key.verify(&digest, &signature).is_ok())
     }
 }

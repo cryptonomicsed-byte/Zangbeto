@@ -12,12 +12,18 @@
 //!   Ọmọ Kọ́dà runtime reads to gate the act.
 //! - `POST /review`  → body `{agent_id, tool}` — review a *proposed* act before
 //!   it runs (Warning-level capability use); same response shape.
+//! - `GET  /guardian/pubkey` → `{"guardian_pubkey": "<hex>"}` — the Ed25519
+//!   public key callers need to verify `zangbeto_sig` on any receipt.
+//! - `POST /diagnostics` → body is an arbitrary JSON diagnostic payload;
+//!   returns `{"receipt_id", "zangbeto_sig"}`, a real Ed25519 signature over
+//!   the receipt id and the payload's canonical (sorted-key) JSON bytes.
 //!
 //! `severity` ∈ observational | warning | critical | catastrophic.
 //! `classification` ∈ schema_drift | economic_anomaly | temporal_inconsistency |
 //!   capability_escape | concurrency_conflict (default for unknowns).
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,6 +34,29 @@ use crate::action_ladder::{ActionLadder, EnforcementAction, EnforcementPolicy, L
 use crate::anomaly::{
     Anomaly, AnomalyClassification, AnomalyEvidence, AnomalySeverity, AnomalySource,
 };
+use crate::guardian::{default_seed_path, Guardian};
+
+/// Loaded once, lazily, on first use -- every route in this pure-function
+/// router shares the same guardian identity for the life of the process.
+static GUARDIAN: OnceLock<Guardian> = OnceLock::new();
+
+fn guardian() -> &'static Guardian {
+    GUARDIAN.get_or_init(|| {
+        Guardian::load_or_create(&default_seed_path())
+            .expect("failed to load or create guardian signing identity")
+    })
+}
+
+/// Canonical bytes for signing: `serde_json::Value`'s object variant is a
+/// `BTreeMap` by default (this workspace does not enable the
+/// `preserve_order` feature), so re-serializing a parsed `Value` always
+/// yields the same byte sequence regardless of the original field order in
+/// the caller's JSON -- independent implementations verifying a receipt
+/// will derive identical bytes as long as they parse-then-reserialize the
+/// same way, rather than hashing the raw request body verbatim.
+fn canonical_json(value: &serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(value).unwrap_or_default()
+}
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
@@ -55,6 +84,11 @@ struct EnforceResponse {
     block: bool,
     rationale: String,
     action: serde_json::Value,
+    /// Unique id for this verdict, bound into `zangbeto_sig` -- a caller can
+    /// verify authenticity via `GET /guardian/pubkey` without trusting the
+    /// transport.
+    receipt_id: String,
+    zangbeto_sig: String,
 }
 
 /// Does this `action_kind` (the serialized [`EnforcementAction`] variant tag)
@@ -161,13 +195,26 @@ fn decide(req: &EnforceRequest) -> EnforceResponse {
         .as_object()
         .and_then(|o| o.keys().next().cloned())
         .unwrap_or_else(|| "unknown".to_string());
+    let block = blocks(&action_kind);
+
+    let receipt_id = Uuid::new_v4().to_string();
+    let signable = serde_json::json!({
+        "agent_id": req.agent_id,
+        "action_kind": action_kind,
+        "block": block,
+        "rationale": decision.rationale,
+        "action": action,
+    });
+    let zangbeto_sig = guardian().sign_receipt(&receipt_id, &canonical_json(&signable));
 
     EnforceResponse {
         agent_id: req.agent_id.clone(),
-        block: blocks(&action_kind),
+        block,
         action_kind,
         rationale: decision.rationale,
         action,
+        receipt_id,
+        zangbeto_sig,
     }
 }
 
@@ -208,6 +255,30 @@ fn route(method: &str, path: &str, body: &[u8]) -> (u16, String) {
                 )
             }
             _ => (400, r#"{"error":"invalid review request"}"#.to_string()),
+        },
+        ("GET", "/guardian/pubkey") => (
+            200,
+            serde_json::json!({ "guardian_pubkey": guardian().public_key_hex() }).to_string(),
+        ),
+        // Sign an arbitrary diagnostic payload (Ọmọ Kọ́dà's diagnostic
+        // pipeline posts here). Accepts any JSON object; rejects anything
+        // else (an empty body, a bare string/number/array) so a caller can't
+        // get a signature over something that doesn't round-trip through
+        // `canonical_json` predictably.
+        ("POST", "/diagnostics") => match serde_json::from_slice::<serde_json::Value>(body) {
+            Ok(payload) if payload.is_object() => {
+                let receipt_id = Uuid::new_v4().to_string();
+                let zangbeto_sig = guardian().sign_receipt(&receipt_id, &canonical_json(&payload));
+                (
+                    200,
+                    serde_json::json!({
+                        "receipt_id": receipt_id,
+                        "zangbeto_sig": zangbeto_sig,
+                    })
+                    .to_string(),
+                )
+            }
+            _ => (400, r#"{"error":"diagnostic payload must be a JSON object"}"#.to_string()),
         },
         _ => (404, r#"{"error":"not found"}"#.to_string()),
     }
@@ -392,6 +463,77 @@ mod tests {
     #[test]
     fn review_missing_agent_id_is_rejected() {
         let (status, _) = route("POST", "/review", br#"{"tool":"x"}"#);
+        assert_eq!(status, 400);
+    }
+
+    #[test]
+    fn enforce_receipt_is_really_signed() {
+        let (_, v) = enforce(r#"{"agent_id":"agent-1","severity":"warning","classification":"x"}"#);
+        let receipt_id = v["receipt_id"].as_str().unwrap();
+        let sig = v["zangbeto_sig"].as_str().unwrap();
+        assert!(!receipt_id.is_empty());
+        assert!(!sig.is_empty());
+
+        let (status, pk_body) = route("GET", "/guardian/pubkey", b"");
+        assert_eq!(status, 200);
+        let pk: serde_json::Value = serde_json::from_str(&pk_body).unwrap();
+        let pubkey_hex = pk["guardian_pubkey"].as_str().unwrap();
+
+        // Re-derive exactly what /enforce signed and confirm it verifies --
+        // proves this isn't a stub that returns Ok(true) unconditionally.
+        let signable = serde_json::json!({
+            "agent_id": v["agent_id"],
+            "action_kind": v["action_kind"],
+            "block": v["block"],
+            "rationale": v["rationale"],
+            "action": v["action"],
+        });
+        assert!(crate::guardian::verify_receipt(
+            pubkey_hex,
+            receipt_id,
+            &canonical_json(&signable),
+            sig,
+        ));
+
+        // A different receipt_id (as if replayed against another receipt)
+        // must NOT verify.
+        assert!(!crate::guardian::verify_receipt(
+            pubkey_hex,
+            "not-the-real-receipt-id",
+            &canonical_json(&signable),
+            sig,
+        ));
+    }
+
+    #[test]
+    fn diagnostics_endpoint_signs_arbitrary_payload() {
+        let (status, resp) = route(
+            "POST",
+            "/diagnostics",
+            br#"{"code":"D001","severity":2,"agent_id":"agent-1"}"#,
+        );
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let receipt_id = v["receipt_id"].as_str().unwrap();
+        let sig = v["zangbeto_sig"].as_str().unwrap();
+
+        let (_, pk_body) = route("GET", "/guardian/pubkey", b"");
+        let pk: serde_json::Value = serde_json::from_str(&pk_body).unwrap();
+        let pubkey_hex = pk["guardian_pubkey"].as_str().unwrap();
+
+        let payload: serde_json::Value =
+            serde_json::from_str(r#"{"code":"D001","severity":2,"agent_id":"agent-1"}"#).unwrap();
+        assert!(crate::guardian::verify_receipt(
+            pubkey_hex,
+            receipt_id,
+            &canonical_json(&payload),
+            sig,
+        ));
+    }
+
+    #[test]
+    fn diagnostics_rejects_non_object_payload() {
+        let (status, _) = route("POST", "/diagnostics", b"\"just a string\"");
         assert_eq!(status, 400);
     }
 }

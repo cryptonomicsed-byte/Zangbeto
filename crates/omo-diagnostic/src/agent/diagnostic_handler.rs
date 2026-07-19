@@ -56,10 +56,10 @@ impl DiagnosticHandler {
             info!("🔐 Security diagnostic: awaiting Zangbeto verification");
             let hash = diag.compute_message_hash();
             let payload = ZangbetoPayload::from_diagnostic(&diag, &hash);
-            let receipt = self.zangbeto.submit_diagnostic(payload).await
+            let receipt = self.zangbeto.submit_diagnostic(payload.clone()).await
                 .map_err(|e| crate::DiagnosticError::SchemaInvalid(e.to_string()))?;
-            
-            if !self.zangbeto.verify_signature(&receipt.receipt_id, &receipt.zangbeto_sig).await? {
+
+            if !self.zangbeto.verify_signature(&receipt.receipt_id, &payload, &receipt.zangbeto_sig)? {
                 return Err(crate::DiagnosticError::SignatureInvalid);
             }
             
