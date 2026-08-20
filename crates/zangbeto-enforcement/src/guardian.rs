@@ -21,6 +21,11 @@ use rand_core::{OsRng, RngCore};
 
 pub struct Guardian {
     signing_key: SigningKey,
+    /// Retained so the guardian's secp256k1/Nostr branch can be derived from
+    /// the same seed on demand (see [`crate::nostr_bridge`]). Kept private and
+    /// never exposed directly -- callers get the derived identity, not the
+    /// material it came from.
+    seed: [u8; 32],
 }
 
 impl Guardian {
@@ -58,7 +63,28 @@ impl Guardian {
         let (signing_key, _verifying_key) = ed25519_keypair_from_seed(&seed)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
-        Ok(Self { signing_key })
+        let seed_arr: [u8; 32] = seed.as_slice().try_into().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "guardian seed must be 32 bytes",
+            )
+        })?;
+
+        Ok(Self {
+            signing_key,
+            seed: seed_arr,
+        })
+    }
+
+    /// This guardian's Nostr identity, derived from the same seed as its
+    /// Ed25519 key but on an independent branch.
+    ///
+    /// Derived on demand rather than at load, so a deployment that never
+    /// publishes to a relay carries no secp256k1 key in memory at all.
+    pub fn nostr_identity(
+        &self,
+    ) -> Result<crate::nostr_bridge::GuardianNostrIdentity, crate::nostr_bridge::BridgeError> {
+        crate::nostr_bridge::GuardianNostrIdentity::from_guardian_seed(&self.seed)
     }
 
     pub fn verifying_key(&self) -> VerifyingKey {

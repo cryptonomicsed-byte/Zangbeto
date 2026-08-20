@@ -9,6 +9,7 @@ pub mod arbitration;
 pub mod daemon;
 pub mod guardian;
 pub mod http;
+pub mod nostr_bridge;
 pub mod quarantine;
 pub mod receipts;
 pub mod rollback;
@@ -19,6 +20,10 @@ pub use anomaly::{Anomaly, AnomalyClassification, AnomalySeverity, AnomalySource
 pub use arbitration::{ArbitrationEngine, ArbitrationGraph, ResolutionStrategy};
 pub use daemon::{DaemonConfig, EnforcementEvent, EnforcementReceipt, ZangbetoDaemon};
 pub use quarantine::{QuarantineId, QuarantineManager};
+pub use nostr_bridge::{
+    enforcement_claim, enforcement_engram, EnforcementClaim, EnforcementRecord,
+    GuardianNostrIdentity,
+};
 
 /// 🜂 Quick-start: create enforcement daemon with default policy
 pub fn create_default_enforcer(
