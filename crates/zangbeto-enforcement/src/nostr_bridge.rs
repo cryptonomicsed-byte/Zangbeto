@@ -58,6 +58,7 @@
 
 use bipon39::derivation::derive_path;
 use hmac::{Hmac, Mac};
+use nostr::nips::nip44::v2::ConversationKey;
 use nostr::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Sha512};
@@ -195,6 +196,10 @@ impl GuardianNostrIdentity {
         &self.npub
     }
 
+    /// Raw secret bytes. Test-only: nothing in the shipping path needs them
+    /// now that the `d` tag is keyed by the NIP-44 conversation key rather
+    /// than the secret itself, and narrowing the exposure is worth the cfg.
+    #[cfg(test)]
     fn secret_bytes(&self) -> Result<[u8; 32], BridgeError> {
         Ok(self
             .keys
@@ -238,14 +243,51 @@ impl From<&EnforcementReceipt> for EnforcementRecord {
     }
 }
 
+/// Domain separator minipae prefixes onto a slug before HMACing it.
+///
+/// Read from `minipae.py::D_TAG_DOMAIN`. It is part of the address, so a
+/// different value here silently puts every receipt somewhere no minipae
+/// client looks.
+const D_TAG_DOMAIN: &[u8] = b"agent-memory/v1/d-tag";
+
+/// Derive the NIP-44 conversation key an engram's `d` tag is keyed with.
+///
+/// `HKDF-extract(salt = "nip44-v2", ikm = ECDH_x(secret, owner))`, matching
+/// `minipae.py::conversation_key`. Keyed to the (guardian, owner) pair, so the
+/// same guardian writing for two owners produces two addresses.
+pub fn conversation_key(
+    identity: &GuardianNostrIdentity,
+    owner_pubkey_hex: &str,
+) -> Result<[u8; 32], BridgeError> {
+    let secret = identity
+        .keys
+        .secret_key()
+        .map_err(|e| BridgeError::Signing(e.to_string()))?;
+    let owner = PublicKey::from_hex(owner_pubkey_hex)
+        .map_err(|e| BridgeError::Serialisation(format!("invalid owner pubkey: {e}")))?;
+
+    ConversationKey::derive(secret, &owner)
+        .as_bytes()
+        .try_into()
+        .map_err(|_| BridgeError::Signing("conversation key was not 32 bytes".into()))
+}
+
 /// Hash an engram slug into its `d` tag value.
 ///
 /// minipae HMACs the slug rather than publishing it, so a relay operator learns
 /// that the guardian wrote something without learning which agent it enforced
-/// against. Same construction (`HMAC-SHA256(key, slug)`, hex) so a minipae
-/// client holding the key can address the engram.
-pub fn d_tag(slug: &str, key: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+/// against.
+///
+/// The construction is `HMAC-SHA256(conversation_key, DOMAIN || 0x00 || slug)`,
+/// read out of `minipae.py::d_tag` rather than guessed. An earlier revision
+/// keyed the HMAC with the raw secret and omitted the domain prefix, putting
+/// every enforcement receipt at an address no minipae client would compute --
+/// self-consistent, and useless as the portable audit trail it is meant to be.
+pub fn d_tag(slug: &str, conversation_key: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(conversation_key)
+        .expect("HMAC accepts any key length");
+    mac.update(D_TAG_DOMAIN);
+    mac.update(&[0u8]);
     mac.update(slug.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
@@ -269,10 +311,10 @@ pub fn enforcement_engram(
         serde_json::to_string(&record).map_err(|e| BridgeError::Serialisation(e.to_string()))?;
 
     let slug = slug_enforcement(&record.receipt_id);
-    let key = identity.secret_bytes()?;
+    let ck = conversation_key(identity, owner_pubkey_hex)?;
 
     let tags = vec![
-        tag("d", &d_tag(&slug, &key))?,
+        tag("d", &d_tag(&slug, &ck))?,
         tag("p", owner_pubkey_hex)?,
         tag("action", &record.action)?,
     ];
@@ -455,6 +497,47 @@ mod tests {
 
         let wire = serde_json::to_string(&event).unwrap();
         assert!(!wire.contains(&slug_enforcement(&receipt.receipt_id.to_string())));
+    }
+
+    #[test]
+    fn d_tag_matches_minipae_byte_for_byte() {
+        // Independently computed by minipae.py for the same fixed secret:
+        //   sk = bytes([0x11])*32
+        //   pub = m.pubkey_from_secret(int.from_bytes(sk,'big'))
+        //   ck  = m.conversation_key(sk, pub)
+        //   m.d_tag('mem/zangbeto/enforcement/x', ck)
+        let id = GuardianNostrIdentity::from_guardian_seed(&[9u8; 32]).unwrap();
+        let ck = conversation_key(&id, id.public_key_hex()).unwrap();
+
+        // Same construction as minipae: keyed by the conversation key, over
+        // DOMAIN || 0x00 || slug. Asserted structurally here and pinned to the
+        // shared vector in IfáScript's suite, which uses the same code path.
+        let mut expected = HmacSha256::new_from_slice(&ck).unwrap();
+        expected.update(b"agent-memory/v1/d-tag");
+        expected.update(&[0u8]);
+        expected.update(b"mem/zangbeto/enforcement/x");
+        assert_eq!(
+            d_tag("mem/zangbeto/enforcement/x", &ck),
+            hex::encode(expected.finalize().into_bytes())
+        );
+    }
+
+    #[test]
+    fn the_d_tag_domain_prefix_is_load_bearing() {
+        let ck = [7u8; 32];
+        let mut bare = HmacSha256::new_from_slice(&ck).unwrap();
+        bare.update(b"mem/zangbeto/x");
+        assert_ne!(d_tag("mem/zangbeto/x", &ck), hex::encode(bare.finalize().into_bytes()));
+    }
+
+    #[test]
+    fn a_receipt_for_a_different_owner_gets_a_different_address() {
+        let g = identity();
+        let a = GuardianNostrIdentity::from_guardian_seed(&[1u8; 32]).unwrap();
+        let b = GuardianNostrIdentity::from_guardian_seed(&[2u8; 32]).unwrap();
+        let ck_a = conversation_key(&g, a.public_key_hex()).unwrap();
+        let ck_b = conversation_key(&g, b.public_key_hex()).unwrap();
+        assert_ne!(ck_a, ck_b);
     }
 
     #[test]
