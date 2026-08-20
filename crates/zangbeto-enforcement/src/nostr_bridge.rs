@@ -43,13 +43,18 @@
 //!
 //! # Kinds: nothing new is minted
 //!
-//! The production Buzz relay enforces a strict kind allowlist and rejects
-//! unknown kinds *after* authentication succeeds — which surfaces as what looks
-//! like an auth failure. Only `30174` and `47000..48000` are admitted. So an
-//! enforcement receipt travels as a minipae engram (`30174`) and an enforcement
-//! decision as a Crucible claim (`47001`); neither is a Zàngbétò invention.
-//! [`relay_admits`] fails locally rather than letting the relay report it
-//! confusingly.
+//! The production Buzz relay enforces a kind allowlist in
+//! `required_scope_for_kind` and rejects kinds with no match arm *after*
+//! authentication succeeds — which surfaces as what looks like an auth
+//! failure. That allowlist is broad (most of Buzz's own vocabulary, plus
+//! `30174`, plus the patched `47000..48000`), but it does not cover an
+//! arbitrary new kind.
+//!
+//! So an enforcement receipt travels as a minipae engram (`30174`) and an
+//! enforcement decision as a Crucible claim (`47001`); neither is a Zàngbétò
+//! invention. [`is_publishable`] states the narrower, checkable thing — the
+//! kinds this module itself emits — rather than trying to mirror the relay's
+//! match arm, which a copy here would silently drift from.
 
 use bipon39::derivation::derive_path;
 use hmac::{Hmac, Mac};
@@ -97,9 +102,14 @@ const NIP06_PATH: [u32; 5] = [
     0,                  // address_index
 ];
 
-/// True when the production Buzz relay's allowlist admits `kind`.
-pub fn relay_admits(kind: u64) -> bool {
-    kind == KIND_AGENT_ENGRAM || CRUCIBLE_RESERVED.contains(&kind)
+/// True when `kind` is one this module is allowed to publish under.
+///
+/// Deliberately **not** a mirror of the relay's allowlist — that is a large
+/// match arm covering most of Buzz's vocabulary, and a copy here would drift
+/// out of sync silently while claiming authority it does not have. This states
+/// only what is checkable: the kinds Zàngbétò emits.
+pub fn is_publishable(kind: u64) -> bool {
+    matches!(kind, KIND_AGENT_ENGRAM | KIND_CLAIM | KIND_AUTH)
 }
 
 /// Errors from deriving identity or building an event.
@@ -113,7 +123,7 @@ pub enum BridgeError {
     Serialisation(String),
     #[error("invalid relay url: {0}")]
     RelayUrl(String),
-    #[error("kind {0} is not admitted by the Buzz relay allowlist")]
+    #[error("kind {0} is not one Zàngbétò publishes under")]
     KindNotAdmitted(u64),
 }
 
@@ -329,7 +339,7 @@ fn build(
     content: String,
     tags: Vec<Tag>,
 ) -> Result<Event, BridgeError> {
-    if !relay_admits(kind) {
+    if !is_publishable(kind) {
         return Err(BridgeError::KindNotAdmitted(kind));
     }
     EventBuilder::new(Kind::Custom(kind), content, tags)
@@ -494,11 +504,21 @@ mod tests {
     }
 
     #[test]
-    fn zangbeto_mints_no_kind_inside_crucibles_block() {
-        for k in [KIND_AGENT_ENGRAM, KIND_CLAIM] {
-            assert!(relay_admits(k), "kind {k} would be rejected at ingest");
+    fn every_kind_zangbeto_emits_is_publishable() {
+        for k in [KIND_AGENT_ENGRAM, KIND_CLAIM, KIND_AUTH] {
+            assert!(is_publishable(k), "kind {k} is emitted but not publishable");
         }
-        assert!(!relay_admits(31337));
+        assert!(!is_publishable(31337));
+    }
+
+    #[test]
+    fn is_publishable_does_not_claim_the_relay_rejects_other_kinds() {
+        // The relay accepts much more than Zàngbétò emits (kind 1, 7, 30023,
+        // 30315...). Returning false here means "not ours", never "the relay
+        // would refuse it" -- conflating those sent an earlier draft of this
+        // module into over-restricting.
+        assert!(!is_publishable(7));
+        assert!(!is_publishable(1));
     }
 
     #[test]
