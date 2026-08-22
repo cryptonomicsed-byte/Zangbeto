@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Veil 1 — Ifa Bones: scans Sui Move contracts for arithmetic vulnerabilities.
+"""Veil 1 — Arithmetic Guard: scans Sui Move contracts for arithmetic vulnerabilities.
 
 Detects: unchecked u64 arithmetic, division-by-zero risk, unguarded arithmetic results.
 Outputs a JSON receipt to immune/receipts/out/veil1_<timestamp>.json.
@@ -84,7 +84,7 @@ def run():
         result_state = "exploited"
 
     receipt = {
-        "veil": "veil1_ifa_bones",
+        "veil": "veil1_arith_guard",
         "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
         "findings_count": len(all_findings),
         "findings": sorted(all_findings, key=lambda f: severity_rank.get(f["severity"], 9)),

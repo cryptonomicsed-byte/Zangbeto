@@ -75,7 +75,7 @@ pub enum ReceiptStatus {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default)]
 pub struct SourceLocation {
     pub language: String,  // rust|julia|elixir|lisp|python|go|move|wasm|ts
-    pub orisha: OrishaMask, // Èṣù|Ọ̀ṣun|Yemọja|Ọbàtálá|Ògún|Ọya|Ṣàngó
+    pub role: OrishaMask, // Access|History|Spawn|Policy|Run|Sync|Score
     pub file: String,
     pub line: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,7 +150,7 @@ pub struct Diagnostic {
     #[serde(default = "Uuid::new_v4")]
     pub trace_id: Uuid,
     pub language: String,
-    pub orisha: OrishaMask,
+    pub role: OrishaMask,
     pub source: SourceLocation,
     pub diagnostic: DiagnosticInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,7 +180,7 @@ pub enum DiagnosticError {
 impl Diagnostic {
     pub fn new(
         language: String,
-        orisha: OrishaMask,
+        role: OrishaMask,
         file: String,
         line: u32,
         code: String,
@@ -193,10 +193,10 @@ impl Diagnostic {
             version: "1.1".into(),
             trace_id: Uuid::new_v4(),
             language: language.clone(),
-            orisha,
+            role,
             source: SourceLocation {
                 language,
-                orisha,
+                role,
                 file,
                 line,
                 column: None,
@@ -271,7 +271,7 @@ mod tests {
             context,
         );
 
-        assert_eq!(diag.orisha, OrishaMask::Eshu);
+        assert_eq!(diag.role, OrishaMask::Eshu);
         assert_eq!(diag.diagnostic.category, (Category::Security as u8 | Category::Logic as u8));
         assert_eq!(diag.constitutional_class, "general");
         assert_eq!(diag.sovereign_scope, "global");
