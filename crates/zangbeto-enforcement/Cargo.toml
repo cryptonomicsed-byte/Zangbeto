@@ -36,6 +36,11 @@ futures-util = "0.3"
 # Real Ed25519 keypair derivation for the guardian signing identity, same
 # lineage as Omo-Koda2's own identity derivation (pinned to the same rev).
 bipon39 = { git = "https://github.com/cryptonomicsed-byte/BIPON39", rev = "9d62b4de8e5b78199a1534ab7b45e08612620380" }
+# Receipt persistence (receipts.rs) -- bundled feature statically links
+# SQLite so the deployed binary has no system libsqlite3 dependency,
+# matching the rest of the ecosystem's SQLite-everywhere pattern without
+# adding a system-package requirement to this crate specifically.
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [[bin]]
 name = "zangbeto-server"
