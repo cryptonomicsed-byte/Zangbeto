@@ -159,6 +159,37 @@ impl ReceiptStore {
         })?;
         rows.collect()
     }
+
+    /// Return all receipts of a specific `kind` whose `timestamp` is strictly
+    /// greater than `after_timestamp`, oldest first. Added for the canary-trip
+    /// surface: `/canary-trips` must return only intrusion events, not every
+    /// receipt kind, so the kernel pulls incidents without the rest of the
+    /// audit trail.
+    pub fn since_kind(
+        &self,
+        after_timestamp: u64,
+        kind: &str,
+    ) -> rusqlite::Result<Vec<Receipt>> {
+        let conn = self.conn.lock().expect("receipt store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, kind, actor, subject, detail, signature
+             FROM receipts WHERE kind = ?1 AND timestamp > ?2 ORDER BY timestamp ASC",
+        )?;
+        let rows = stmt.query_map(params![kind, after_timestamp as i64], |row| {
+            let detail_str: String = row.get(5)?;
+            let detail = serde_json::from_str(&detail_str).unwrap_or(serde_json::Value::Null);
+            Ok(Receipt {
+                id: row.get(0)?,
+                timestamp: row.get::<_, i64>(1)? as u64,
+                kind: row.get(2)?,
+                actor: row.get(3)?,
+                subject: row.get(4)?,
+                detail,
+                signature: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
 }
 
 /// Default on-disk location for the receipt store, relative to the
@@ -261,6 +292,73 @@ mod tests {
         // Oldest first.
         assert_eq!(recent[0].timestamp, 200);
         assert_eq!(recent[1].timestamp, 300);
+    }
+
+    #[test]
+    fn since_kind_returns_only_that_kind() {
+        let store = ReceiptStore::open_in_memory().unwrap();
+        let guardian = test_guardian();
+
+        // Two canary_trip receipts interleaved with an unrelated kind.
+        store
+            .emit(&make_receipt(
+                &guardian,
+                "canary_trip".into(),
+                "aaa".into(),
+                "aws_keys".into(),
+                serde_json::json!({"src_ip": "1.2.3.4"}),
+            ))
+            .unwrap();
+        store
+            .emit(&make_receipt(
+                &guardian,
+                "state_transition".into(),
+                "x".into(),
+                "y".into(),
+                serde_json::json!({}),
+            ))
+            .unwrap();
+        store
+            .emit(&make_receipt(
+                &guardian,
+                "canary_trip".into(),
+                "bbb".into(),
+                "ms_word".into(),
+                serde_json::json!({"src_ip": "5.6.7.8"}),
+            ))
+            .unwrap();
+
+        let trips = store.since_kind(0, "canary_trip").unwrap();
+        assert_eq!(trips.len(), 2);
+        assert!(trips.iter().all(|r| r.kind == "canary_trip"));
+        // The unrelated receipt is excluded, not returned.
+        assert!(trips.iter().all(|r| r.kind != "state_transition"));
+    }
+
+    #[test]
+    fn since_kind_respects_the_since_bound() {
+        let store = ReceiptStore::open_in_memory().unwrap();
+        let guardian = test_guardian();
+
+        store
+            .emit(&make_test_receipt(&guardian, Some(100)))
+            .unwrap();
+        // A canary_trip at ts 200.
+        let mut trip = make_receipt(
+            &guardian,
+            "canary_trip".into(),
+            "a".into(),
+            "aws_keys".into(),
+            serde_json::json!({}),
+        );
+        let payload = signable_payload(200, &trip.kind, &trip.actor, &trip.subject, &trip.detail);
+        trip.timestamp = 200;
+        trip.signature = guardian.sign_receipt(&trip.id, &payload);
+        store.emit(&trip).unwrap();
+
+        // since=150 includes the trip; since=200 excludes it (strictly greater).
+        assert_eq!(store.since_kind(150, "canary_trip").unwrap().len(), 1);
+        assert_eq!(store.since_kind(200, "canary_trip").unwrap().len(), 0);
     }
 
     #[test]

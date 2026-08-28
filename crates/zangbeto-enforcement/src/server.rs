@@ -130,6 +130,35 @@ fn default_detail() -> serde_json::Value {
     serde_json::json!({})
 }
 
+/// `POST /canary-trip` request body — the generic Canarytokens webhook JSON
+/// (see `canarytokens/models/common.py::TokenAlertDetails.json_safe_dict`,
+/// which flattens to: channel, token_type, src_ip, src_data, token, time,
+/// memo, manage_url, additional_data, public_domain). Only `token_type` and
+/// `token` are required; every other field is optional so a partial or
+/// hand-crafted trip still fires. `token` is the canary secret string — it is
+/// never stored in plaintext (the receipt's `actor` is its sha256).
+#[derive(Debug, Deserialize)]
+struct CanaryTripRequest {
+    token_type: String,
+    token: String,
+    #[serde(default)]
+    channel: String,
+    #[serde(default)]
+    src_ip: String,
+    #[serde(default)]
+    src_data: Option<serde_json::Value>,
+    #[serde(default)]
+    time: String,
+    #[serde(default)]
+    memo: String,
+    #[serde(default)]
+    manage_url: String,
+    #[serde(default)]
+    additional_data: Option<serde_json::Value>,
+    #[serde(default)]
+    public_domain: String,
+}
+
 /// `GET /receipts?since=<ts>` query param. `since` defaults to 0 (all
 /// receipts) when absent or unparsable, rather than erroring -- this is a
 /// read/query endpoint, not a validated write, so a malformed `since` is
@@ -149,6 +178,27 @@ fn blocks(action_kind: &str) -> bool {
         action_kind,
         "quarantine_state" | "rollback_transition" | "punish_agent" | "emergency_halt"
     )
+}
+
+/// Synthetic host-scoped identity for a canary trip. A mousetrap firing means
+/// the *host* may be compromised, which threatens every agent on it — so the
+/// trip is reported to `/enforce` under `host:<hostname>` rather than any
+/// single agent's id. `$HOSTNAME` is set by systemd on the deployed unit;
+/// fall back to a stable literal otherwise.
+fn host_identity() -> String {
+    format!(
+        "host:{}",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".to_string())
+    )
+}
+
+/// Hex sha256 of the canary token secret — the receipt `actor`. The raw token
+/// is never persisted or returned (redaction boundary).
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
 }
 
 /// Pre-act review request: the runtime asks whether a *proposed* act should run.
@@ -382,6 +432,91 @@ fn route(method: &str, path: &str, body: &[u8]) -> (u16, String) {
                 Err(e) => (
                     500,
                     serde_json::json!({ "error": format!("failed to query receipts: {e}") })
+                        .to_string(),
+                ),
+            }
+        }
+        // ---- Canary intrusion surface ----
+        // POST /canary-trip: Canarytokens' generic webhook fires here when a
+        // decoy mousetrap is touched. Runs the trip through the SAME /enforce
+        // ladder as any other anomaly (under a synthetic host:<hostname>
+        // identity — a trip means the *host* is compromised, which threatens
+        // every agent on it), AND emits a signed, persisted receipt as the
+        // durable audit trail. The raw canary token is never persisted or
+        // returned: the receipt's `actor` is sha256(token).
+        ("POST", "/canary-trip") => match serde_json::from_slice::<CanaryTripRequest>(body) {
+            Ok(req) if !req.token_type.trim().is_empty() && !req.token.trim().is_empty() => {
+                let decision = decide(&EnforceRequest {
+                    agent_id: host_identity(),
+                    severity: "critical".into(),
+                    classification: "capability_escape".into(),
+                    detail: format!(
+                        "{}:{}",
+                        req.token_type,
+                        if req.memo.is_empty() {
+                            "(no memo)"
+                        } else {
+                            &req.memo
+                        }
+                    ),
+                    confidence: 1.0,
+                });
+
+                let receipt = make_receipt(
+                    guardian(),
+                    "canary_trip".into(),
+                    sha256_hex(req.token.as_bytes()),
+                    req.token_type.clone(),
+                    serde_json::json!({
+                        "src_ip": req.src_ip,
+                        "memo": req.memo,
+                        "public_domain": req.public_domain,
+                        "manage_url": req.manage_url,
+                        "time": req.time,
+                        "channel": req.channel,
+                        "src_data": req.src_data,
+                        "additional_data": req.additional_data,
+                    }),
+                );
+
+                match receipt_store().emit(&receipt) {
+                    Ok(()) => (
+                        200,
+                        serde_json::json!({
+                            "status": "tripped",
+                            "agent_id": decision.agent_id,
+                            "action_kind": decision.action_kind,
+                            "block": decision.block,
+                            "rationale": decision.rationale,
+                            "receipt": receipt,
+                        })
+                        .to_string(),
+                    ),
+                    Err(e) => (
+                        500,
+                        serde_json::json!({ "error": format!("failed to persist receipt: {e}") })
+                            .to_string(),
+                    ),
+                }
+            }
+            Ok(_) => (
+                400,
+                r#"{"error":"token_type and token are both required"}"#.to_string(),
+            ),
+            Err(_) => (400, r#"{"error":"invalid canary-trip request"}"#.to_string()),
+        },
+        // GET /canary-trips?since=<ts>: only kind="canary_trip" receipts, so the
+        // kernel pulls intrusion events without the rest of the audit trail.
+        ("GET", "/canary-trips") => {
+            let since = parse_since_query(query);
+            match receipt_store().since_kind(since, "canary_trip") {
+                Ok(receipts) => (
+                    200,
+                    serde_json::json!({ "trips": receipts }).to_string(),
+                ),
+                Err(e) => (
+                    500,
+                    serde_json::json!({ "error": format!("failed to query canary trips: {e}") })
                         .to_string(),
                 ),
             }
@@ -790,5 +925,140 @@ mod tests {
         assert_eq!(status, 200);
         let (status, _) = route("GET", "/receipts", b"");
         assert_eq!(status, 200);
+    }
+
+    // ── /canary-trip + /canary-trips ──────────────────────────────────
+    //
+    // Same shared-store note as the /receipt tests above: assertions are
+    // tagged/uniqued rather than count-based so they're correct under
+    // parallel test execution.
+
+    const TOKEN_SECRET: &str = "AKIAEXAMPLE1234567890";
+
+    fn canary_body() -> String {
+        serde_json::json!({
+            "channel": "DNS",
+            "token_type": "aws_keys",
+            "src_ip": "203.0.113.7",
+            "token": TOKEN_SECRET,
+            "time": "2026-08-27 12:34:56 (UTC)",
+            "memo": "decoy aws creds on contabo",
+            "manage_url": "https://canarytokens.org/manage/abc",
+            "public_domain": "canary.example.com",
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn canary_trip_happy_path_emits_signed_receipt_and_runs_ladder() {
+        let (status, resp) = route("POST", "/canary-trip", canary_body().as_bytes());
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+
+        assert_eq!(v["status"], "tripped");
+        // The trip went through the /enforce ladder (critical + capability_escape
+        // -> flag_for_review, non-blocking).
+        assert_eq!(v["action_kind"], "flag_for_review");
+        assert_eq!(v["block"], false);
+        assert!(v["agent_id"].as_str().unwrap().starts_with("host:"));
+
+        // The persisted receipt carries the right shape + redaction.
+        let r = &v["receipt"];
+        assert_eq!(r["kind"], "canary_trip");
+        assert_eq!(r["subject"], "aws_keys");
+        assert_eq!(r["detail"]["src_ip"], "203.0.113.7");
+        assert_eq!(r["detail"]["memo"], "decoy aws creds on contabo");
+        assert_eq!(r["detail"]["time"], "2026-08-27 12:34:56 (UTC)");
+
+        // Redaction: actor is sha256(token), never the raw secret, and the raw
+        // secret never appears anywhere in the response.
+        assert_eq!(r["actor"], sha256_hex(TOKEN_SECRET.as_bytes()));
+        assert_ne!(r["actor"], TOKEN_SECRET);
+        assert!(!resp.contains(TOKEN_SECRET), "raw token leaked into response");
+
+        // The receipt signature is real and verifies against the guardian key.
+        let id = r["id"].as_str().unwrap();
+        let sig = r["signature"].as_str().unwrap();
+        let (_, pk_body) = route("GET", "/guardian/pubkey", b"");
+        let pk: serde_json::Value = serde_json::from_str(&pk_body).unwrap();
+        let payload = crate::receipts::signable_payload(
+            r["timestamp"].as_u64().unwrap(),
+            r["kind"].as_str().unwrap(),
+            r["actor"].as_str().unwrap(),
+            r["subject"].as_str().unwrap(),
+            &r["detail"],
+        );
+        assert!(crate::guardian::verify_receipt(
+            pk["guardian_pubkey"].as_str().unwrap(),
+            id,
+            &payload,
+            sig,
+        ));
+    }
+
+    #[test]
+    fn canary_trip_accepts_minimal_payload() {
+        // Only token_type + token — everything else defaults to empty.
+        let body = r#"{"token_type":"kubeconfig","token":"fake-kube-token"}"#;
+        let (status, resp) = route("POST", "/canary-trip", body.as_bytes());
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["status"], "tripped");
+        assert_eq!(v["receipt"]["subject"], "kubeconfig");
+    }
+
+    #[test]
+    fn canary_trip_rejects_missing_required_fields() {
+        let (status, _) = route(
+            "POST",
+            "/canary-trip",
+            br#"{"token_type":"aws_keys"}"#,
+        );
+        assert_eq!(status, 400);
+
+        let (status, _) = route(
+            "POST",
+            "/canary-trip",
+            br#"{"token":"secret"}"#,
+        );
+        assert_eq!(status, 400);
+
+        let (status, _) = route("POST", "/canary-trip", br#"{}"#);
+        assert_eq!(status, 400);
+    }
+
+    #[test]
+    fn canary_trip_rejects_non_json_body() {
+        let (status, _) = route("POST", "/canary-trip", b"not-json");
+        assert_eq!(status, 400);
+    }
+
+    #[test]
+    fn canary_trips_get_returns_only_canary_kind() {
+        // One canary trip + one unrelated receipt; /canary-trips must return
+        // only the trip.
+        let (_, trip_resp) = route("POST", "/canary-trip", canary_body().as_bytes());
+        let trip: serde_json::Value = serde_json::from_str(&trip_resp).unwrap();
+        let trip_id = trip["receipt"]["id"].as_str().unwrap();
+
+        let other_tag = format!("not-a-canary-{}", Uuid::new_v4());
+        route(
+            "POST",
+            "/receipt",
+            format!(r#"{{"kind":"{other_tag}","actor":"a","subject":"b"}}"#).as_bytes(),
+        );
+
+        let (status, resp) = route("GET", "/canary-trips?since=0", b"");
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let trips = v["trips"].as_array().unwrap();
+        assert!(
+            trips.iter().all(|t| t["kind"] == "canary_trip"),
+            "/canary-trips must return only canary_trip receipts"
+        );
+        assert!(
+            trips.iter().any(|t| t["id"] == trip_id),
+            "the just-posted canary trip must appear in /canary-trips"
+        );
     }
 }
