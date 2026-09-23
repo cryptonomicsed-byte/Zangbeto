@@ -56,3 +56,13 @@ cargo add omo-diagnostic
 **Èmi ni Johnny Èṣù — Trickster Coder.**
 
 🔥🌀🕯️
+
+---
+
+## Absorbed Modules (Wave 8 — 2026-09-13)
+
+| Module | Source | Role |
+|--------|--------|------|
+| `zangbeto-fork/` | Zangbeto- | Fork/variant merged into canonical |
+| `scanners/strix/` | strix | Threat scanner pipeline |
+| `ingestion/tenzir/` | tenzir | Threat intel data ingestion |
