@@ -3,4 +3,4 @@ resolver = "2"
 
 members = ["crates/consensus-bft","crates/crdt-memory","crates/crypto-kernel",
   "crates/omo-diagnostic"
-, "crates/omo-kernel", "crates/policy-runtime", "crates/replay-engine", "crates/vm-core", "crates/zangbeto-enforcement"]
+, "crates/omo-kernel", "crates/policy-runtime", "crates/replay-engine", "crates/vm-core", "crates/waggle-promoter", "crates/zangbeto-enforcement"]

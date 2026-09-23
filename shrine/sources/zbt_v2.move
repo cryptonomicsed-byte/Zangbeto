@@ -16,7 +16,7 @@ module zbt::zbt_v2 {
         drift_detected: bool,
         drift_type: Option<DriftType>,
         repair_applied: bool,
-        orisha_consensus: vector<ValidatorSignature>,
+        role_consensus: vector<ValidatorSignature>,
         committed_epoch: u64,
     }
 
@@ -28,7 +28,7 @@ module zbt::zbt_v2 {
     }
 
     public struct ValidatorSignature has store {
-        orisha: string::String,
+        role: string::String,
         signature: vector<u8>,
         public_key: vector<u8>,
         authority_weight: u8,
@@ -81,7 +81,7 @@ module zbt::zbt_v2 {
             drift_detected,
             drift_type: option::none(),
             repair_applied,
-            orisha_consensus: vector::empty(),
+            role_consensus: vector::empty(),
             committed_epoch: tx_context::epoch(ctx),
         };
         

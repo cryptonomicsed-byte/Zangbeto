@@ -1,0 +1,8 @@
+[package]
+name = "waggle-promoter"
+version = "0.1.0"
+edition = "2021"
+
+# Std only on purpose: promotion must be callable from any verification
+# context (CI, sandboxed replay, air-gapped audit rig) with zero deps.
+[dependencies]

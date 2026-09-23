@@ -15,3 +15,5 @@ __pycache__/
 
 # Local Archive
 ops/archive/
+.guardian/
+.receipts/
