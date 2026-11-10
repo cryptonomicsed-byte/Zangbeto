@@ -1,20 +1,16 @@
-//! ZÀNGBÉTÒ enforcement HTTP bridge binary.
+//! ZÀNGBÉTÒ enforcement bridge binary.
 //!
-//! Serves `POST /enforce`, `POST /review`, and `GET /health` so the Ọmọ Kọ́dà
-//! runtime can reach the enforcer over the wire (the address it expects in
-//! `ZANGBETO_URL`). Port via `ZANGBETO_PORT` (default 8787).
+//! Listens on `ZANGBETO_BIND` (default `127.0.0.1:8787`; set `0.0.0.0:8787`
+//! explicitly to expose it) and serves the HTTP
+//! enforcement API so remote Ọmọ Kọ́dà runtimes can request enforcement
+//! decisions for an agent.
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let port: u16 = std::env::var("ZANGBETO_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8787);
-
-    let app = zangbeto_enforcement::http::router();
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    println!("🕯 ZÀNGBÉTÒ enforcement HTTP bridge listening on {addr}");
-    axum::serve(listener, app).await?;
-    Ok(())
+async fn main() {
+    let addr = std::env::var("ZANGBETO_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
+    eprintln!("🕯 ZÀNGBÉTÒ enforcement bridge listening on {addr}");
+    if let Err(e) = zangbeto_enforcement::server::serve(&addr).await {
+        eprintln!("zangbeto server error: {e}");
+        std::process::exit(1);
+    }
 }
